@@ -1,0 +1,309 @@
+{
+  "name": "Topic 2 - Advanced Expressions & PDF Data Extraction",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -288,
+        0
+      ],
+      "id": "5d92d835-6cc3-45ee-aba7-8e2cd6a307b4",
+      "name": "Manual_Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst invoiceLines = [\n  \"INVOICE NUMBER: INV-PDF-2026-904\",\n  \"DATE: 2026-10-14\",\n  \"VENDOR: Acme Industrial Automation Corp\",\n  \"ITEM: Industrial Sensor Pack x3 @ 150.00 USD = 450.00 USD\",\n  \"ITEM: DIN Rail Power Supply x2 @ 85.50 USD = 171.00 USD\",\n  \"SUBTOTAL: 621.00 USD\",\n  \"TAX: 49.68 USD\",\n  \"TOTAL: 670.68 USD\"\n];\n\nconst escapePdfText = (text) =>\n  text.replace(/\\\\/g, \"\\\\\\\\\")\n      .replace(/\\(/g, \"\\\\(\")\n      .replace(/\\)/g, \"\\\\)\");\n\nconst textCommands = [\n  \"BT\",\n  \"/F1 11 Tf\",\n  \"50 750 Td\",\n  ...invoiceLines.flatMap((line, index) => [\n    ...(index === 0 ? [] : [\"0 -24 Td\"]),\n    `(${escapePdfText(line)}) Tj`\n  ]),\n  \"ET\"\n].join(\"\\n\");\n\nconst stream = textCommands + \"\\n\";\n\nconst objects = [\n  \"<< /Type /Catalog /Pages 2 0 R >>\",\n  \"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\",\n  \"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\",\n  `<< /Length ${Buffer.byteLength(stream, \"utf8\")} >>\\nstream\\n${stream}endstream`,\n  \"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\"\n];\n\nlet pdf = \"%PDF-1.4\\n\";\nconst offsets = [0];\n\nfor (let i = 0; i < objects.length; i++) {\n  offsets.push(Buffer.byteLength(pdf, \"utf8\"));\n  pdf += `${i + 1} 0 obj\\n${objects[i]}\\nendobj\\n`;\n}\n\nconst xrefOffset = Buffer.byteLength(pdf, \"utf8\");\n\npdf += `xref\\n0 ${objects.length + 1}\\n`;\npdf += \"0000000000 65535 f \\n\";\n\nfor (let i = 1; i < offsets.length; i++) {\n  pdf += `${String(offsets[i]).padStart(10, \"0\")} 00000 n \\n`;\n}\n\npdf += `trailer\\n<< /Size ${objects.length + 1} /Root 1 0 R >>\\n`;\npdf += `startxref\\n${xrefOffset}\\n%%EOF`;\n\nconst base64Data = Buffer.from(pdf, \"utf8\").toString(\"base64\");\n\nreturn [\n  {\n    json: {\n      fileName: \"vendor_invoice_INV-904.pdf\",\n      sourceChannel: \"Supplier_Portal_Upload\",\n      fileType: \"application/pdf\"\n    },\n    binary: {\n      data: {\n        data: base64Data,\n        mimeType: \"application/pdf\",\n        fileName: \"vendor_invoice_INV-904.pdf\",\n        fileExtension: \"pdf\"\n      }\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -128,
+        -96
+      ],
+      "id": "926f21d7-6289-483b-b6aa-8e0b77a526b4",
+      "name": "Code_SimulatePDFInvoiceBinary"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        64,
+        -96
+      ],
+      "id": "68ac16f4-1cda-4767-9b4d-d357a8eadf23",
+      "name": "Extract_PDF_Text"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst rawText = $input.item.json.text || \"\";\n\nconst extract = (regex) => {\n  const match = rawText.match(regex);\n  return match ? match[1].trim() : null;\n};\n\nconst invoiceNumber = extract(\n  /INVOICE NUMBER:\\s*([A-Z0-9-]+)/i\n);\n\nconst invoiceDate = extract(\n  /DATE:\\s*(\\d{4}-\\d{2}-\\d{2})/i\n);\n\nconst vendor = extract(\n  /VENDOR:\\s*([^\\r\\n]+)/i\n);\n\nconst subtotal = extract(\n  /SUBTOTAL:\\s*([\\d,]+(?:\\.\\d{1,2})?)/i\n);\n\nconst tax = extract(\n  /TAX:\\s*([\\d,]+(?:\\.\\d{1,2})?)/i\n);\n\nconst total = extract(\n  /TOTAL:\\s*([\\d,]+(?:\\.\\d{1,2})?)/i\n);\n\nconst itemRegex =\n  /ITEM:\\s*(.*?)\\s+x(\\d+)\\s+@\\s*([\\d.]+)\\s+USD\\s*=\\s*([\\d.]+)\\s+USD/gi;\n\nconst items = [];\nlet match;\n\nwhile ((match = itemRegex.exec(rawText)) !== null) {\n  items.push({\n    sku: \"PDF-EXTRACTED-SKU\",\n    description: match[1].trim(),\n    quantity: Number(match[2]),\n    unitPrice: Number(match[3]),\n    lineTotal: Number(match[4])\n  });\n}\n\nif (!invoiceNumber || !invoiceDate || !vendor ||\n    subtotal === null || tax === null || total === null ||\n    items.length === 0) {\n  throw new Error(\n    \"Invoice parsing failed. Check the extracted PDF text.\"\n  );\n}\n\nreturn {\n  json: {\n    sourceType: \"PDF_INVOICE\",\n    orderId: invoiceNumber,\n    orderDate: invoiceDate,\n    customer: {\n      fullName: vendor,\n      email: \"billing@acmeindustrial.com\",\n      phone: \"+1-800-555-0199\"\n    },\n    items,\n    financials: {\n      subtotal: Number(subtotal.replace(/,/g, \"\")),\n      tax: Number(tax.replace(/,/g, \"\")),\n      total: Number(total.replace(/,/g, \"\"))\n    }\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        -96
+      ],
+      "id": "72e2bc71-b2cd-463d-a478-415e0c527aff",
+      "name": "Transform_ParsePDFInvoice"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nreturn [\n  {\n    json: {\n      orderId: \"LEG-8841\",\n      orderDate: \"10/14/2026\",\n      sourceTimezone: \"America/New_York\",\n      customer: {\n        rawName: \" jOHn dOE-sMITH \",\n        email: \"JOHN.DOE@GMAIL.COM \",\n        phone: \"(555) 019-2834\"\n      },\n      items: [\n        {\n          sku: \"item-01\",\n          description: \"Mechanical Keyboard\",\n          unitPrice: \" $129.99 \",\n          quantity: 2\n        },\n        {\n          sku: \"item-02\",\n          description: \"Wrist Rest\",\n          unitPrice: \"24.50\",\n          quantity: 1\n        }\n      ],\n      discountPercent: 10\n    }\n  },\n  {\n    json: {\n      orderId: \"LEG-8842\",\n      orderDate: \"2026-10-15T08:45:00-07:00\",\n      sourceTimezone: \"America/Los_Angeles\",\n      customer: {\n        rawName: \"ALICE WONDERLAND\",\n        email: \"alice@adventures.co.uk\",\n        phone: \"+44 20 7946 0919\"\n      },\n      items: [\n        {\n          sku: \"item-09\",\n          description: \"UltraWide Monitor 34-inch\",\n          unitPrice: \"499.00 USD\",\n          quantity: 1\n        },\n        {\n          sku: \"item-12\",\n          description: \"Monitor Arm Mount\",\n          unitPrice: \"$85.00\",\n          quantity: 2\n        }\n      ],\n      discountPercent: 15\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -112,
+        160
+      ],
+      "id": "fc86b2bf-0732-4f97-a03b-ff9e9baa636d",
+      "name": "Code_GenerateLegacyOrders"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst item = $input.item.json;\nconst rawDate = String(item.orderDate || \"\").trim();\nconst tz = item.sourceTimezone || \"UTC\";\n\nlet parsedDate;\n\nif (rawDate.includes(\"/\")) {\n  parsedDate = DateTime.fromFormat(\n    rawDate,\n    \"MM/dd/yyyy\",\n    { zone: tz }\n  );\n} else {\n  parsedDate = DateTime.fromISO(\n    rawDate,\n    { setZone: true }\n  );\n}\n\nif (!parsedDate.isValid) {\n  throw new Error(\n    `Invalid order date for ${item.orderId}: ${rawDate}`\n  );\n}\n\nreturn {\n  json: {\n    ...item,\n    normalizedDateUtc: parsedDate.toUTC().toISO(),\n    displayDate: parsedDate.toFormat(\n      \"yyyy-MM-dd HH:mm:ss\"\n    )\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        112,
+        160
+      ],
+      "id": "a79a21cc-d5fb-405e-9567-e737e4db9382",
+      "name": "Code_NormalizeDates"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst item = $input.item.json;\n\nconst cleanedItems = (item.items || []).map((it) => {\n  const priceText = String(it.unitPrice ?? \"0\")\n    .replace(/,/g, \"\")\n    .replace(/[^0-9.]/g, \"\");\n\n  const unitPrice = Number(priceText);\n  const quantity = Number(it.quantity);\n\n  if (!Number.isFinite(unitPrice) || unitPrice < 0) {\n    throw new Error(`Invalid unit price for ${it.sku}`);\n  }\n\n  if (!Number.isInteger(quantity) || quantity <= 0) {\n    throw new Error(`Invalid quantity for ${it.sku}`);\n  }\n\n  return {\n    sku: it.sku,\n    description: String(it.description || \"\").trim(),\n    unitPrice,\n    quantity,\n    lineTotal: Number((unitPrice * quantity).toFixed(2))\n  };\n});\n\nconst subtotal = Number(\n  cleanedItems.reduce(\n    (sum, it) => sum + it.lineTotal, 0\n  ).toFixed(2)\n);\n\nconst discountRate = Number(item.discountPercent || 0) / 100;\n\nif (discountRate < 0 || discountRate > 1) {\n  throw new Error(\"Discount must be between 0 and 100\");\n}\n\nconst discount = Number(\n  (subtotal * discountRate).toFixed(2)\n);\n\nconst discountedSubtotal = Number(\n  (subtotal - discount).toFixed(2)\n);\n\nconst tax = Number(\n  (discountedSubtotal * 0.08).toFixed(2)\n);\n\nconst total = Number(\n  (discountedSubtotal + tax).toFixed(2)\n);\n\nconst rawName = String(\n  item.customer?.rawName || \"\"\n).trim();\n\nconst fullName = rawName\n  .toLowerCase()\n  .replace(/\\b\\w/g, (c) => c.toUpperCase());\n\nreturn {\n  json: {\n    sourceType: \"LEGACY_JSON\",\n    orderId: item.orderId,\n    orderDate: item.normalizedDateUtc,\n    customer: {\n      fullName,\n      email: String(item.customer?.email || \"\")\n        .trim()\n        .toLowerCase(),\n      phone: item.customer?.phone || \"\"\n    },\n    items: cleanedItems,\n    financials: {\n      subtotal,\n      discount,\n      tax,\n      total\n    }\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        160
+      ],
+      "id": "a41b6bcd-09ee-4b54-9da5-877be934f03f",
+      "name": "Transform_ProcessLineItems"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e471f569-8714-4bce-a333-cb1c814bae14",
+              "name": "documentType",
+              "value": "={{ $json.sourceType }}",
+              "type": "string"
+            },
+            {
+              "id": "2fb1067c-2af5-47f8-9077-abe859605805",
+              "name": "erpTransactionId",
+              "value": "={{ 'TX-' + $json.orderId }}",
+              "type": "string"
+            },
+            {
+              "id": "e6cbcaa8-07bf-4cad-8bca-41b6350eed71",
+              "name": "accountName",
+              "value": "={{ $json.customer.fullName }}",
+              "type": "string"
+            },
+            {
+              "id": "47028556-7baf-4009-95a3-b97816dacb85",
+              "name": "contactEmail",
+              "value": "={{ $json.customer.email }}",
+              "type": "string"
+            },
+            {
+              "id": "092aa9da-a36f-4ca7-9143-cc45eab3058f",
+              "name": "lineItemCount",
+              "value": "={{ $json.items.length }}",
+              "type": "number"
+            },
+            {
+              "id": "54821243-1bab-474f-8542-ce4225bfcdfc",
+              "name": "amountPayable",
+              "value": "={{ $json.financials.total }}",
+              "type": "number"
+            },
+            {
+              "id": "fbd2da16-261d-4d7f-8e9a-df6a5c92891d",
+              "name": "processedAt",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        560,
+        16
+      ],
+      "id": "544edf8e-dbb2-4556-b26b-d88930fd35a5",
+      "name": "Edit_Fields_StandardizeERP"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://n8n.tayanasolutions.com/webhook/mock/erp/orders",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        768,
+        16
+      ],
+      "id": "2e23bca9-807d-4845-ba4c-785de6b47b98",
+      "name": "HTTP_PostCleanOrderToERP",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst items = $input.all();\n\nconst totalAmount = items.reduce(\n  (sum, item) =>\n    sum + Number(item.json.amountPayable || 0),\n  0\n);\n\nreturn [\n  {\n    json: {\n      batchStatus: \"COMPLETED\",\n      totalRecordsProcessed: items.length,\n      totalRevenueProcessed: Number(\n        totalAmount.toFixed(2)\n      ),\n      summaryTimestamp: $now.toISO()\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        976,
+        16
+      ],
+      "id": "1ba4e7af-2f17-4698-9570-962397b367b9",
+      "name": "Code_AuditSummary"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual_Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code_SimulatePDFInvoiceBinary",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code_GenerateLegacyOrders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code_SimulatePDFInvoiceBinary": {
+      "main": [
+        [
+          {
+            "node": "Extract_PDF_Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract_PDF_Text": {
+      "main": [
+        [
+          {
+            "node": "Transform_ParsePDFInvoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code_GenerateLegacyOrders": {
+      "main": [
+        [
+          {
+            "node": "Code_NormalizeDates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code_NormalizeDates": {
+      "main": [
+        [
+          {
+            "node": "Transform_ProcessLineItems",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform_ProcessLineItems": {
+      "main": [
+        [
+          {
+            "node": "Edit_Fields_StandardizeERP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform_ParsePDFInvoice": {
+      "main": [
+        [
+          {
+            "node": "Edit_Fields_StandardizeERP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit_Fields_StandardizeERP": {
+      "main": [
+        [
+          {
+            "node": "HTTP_PostCleanOrderToERP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_PostCleanOrderToERP": {
+      "main": [
+        [
+          {
+            "node": "Code_AuditSummary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "e2a0b8e2-da03-40cb-a02d-b87d6b068320",
+  "meta": {
+    "instanceId": "a03c7678428ef19ededbf912f16f7d5798ec7b9ab4c17f2a2def6a9e791e7215"
+  },
+  "nodeGroups": [],
+  "id": "lUKHyvBMcW3gxIiI",
+  "tags": []
+}
